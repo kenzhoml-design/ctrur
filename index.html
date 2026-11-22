@@ -1,0 +1,694 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>CHESS 3D ONLINE</title>
+
+<style>
+*{box-sizing:border-box}
+body{
+ margin:0;background:#15191e;color:white;
+ font-family:Arial;overflow:hidden;
+ user-select: none;
+  -webkit-tap-highlight-color: transparent;
+}
+canvas{display:block}
+#panel{
+ position:absolute;top:12px;left:12px;
+ background:#101820df;padding:14px;
+ border:1px solid #b18b52;border-radius:12px;
+ z-index:3;max-width:270px;
+}
+h2{margin:0 0 10px;color:#e8c38c}
+button,input{
+ padding:10px;border-radius:7px;
+ border:1px solid #b18b52;
+ margin:3px;background:#283746;color:white;
+}
+button{cursor:pointer}
+button:hover{background:#53677c}
+#roomInfo{color:#ffda91;margin-top:8px}
+#status{margin-top:8px}
+#controls{
+ position:absolute;bottom:15px;right:15px;
+ display:flex;gap:8px;z-index:3;
+}
+#controls button{background:#26394c}
+#message{
+ position:absolute;bottom:15px;left:15px;
+ background:#101820dd;padding:10px;
+ border-radius:8px;z-index:3;
+}
+#connection{
+ position:absolute;top:12px;right:12px;
+ background:#101820dd;padding:10px;
+ border-radius:8px;z-index:3;
+}
+@media(max-width:600px){
+ #panel{max-width:220px;font-size:12px}
+ h2{font-size:17px}
+ button,input{padding:8px;font-size:12px}
+}
+</style>
+</head>
+<body>
+
+<div id="panel">
+<h2>♛ CHESS 3D</h2>
+
+<div id="status">Hubungkan untuk bermain</div>
+
+<button id="create">BUAT ROOM</button>
+<br>
+
+<input id="roomInput" placeholder="Kode room">
+<button id="join">JOIN</button>
+
+<div id="roomInfo">Belum masuk room</div>
+<div id="turn">Giliran: Putih</div>
+
+<button id="reset">RESTART</button>
+</div>
+
+<div id="connection">● Connecting...</div>
+
+<div id="message">
+Pilih bidak untuk melihat langkah legalnya.
+</div>
+
+<div id="controls">
+<button id="rotate">PUTAR KAMERA</button>
+<button id="zoomIn">ZOOM +</button>
+<button id="zoomOut">ZOOM -</button>
+</div>
+
+<script src="/socket.io/socket.io.js"></script>
+
+<script type="module">
+
+import * as THREE from
+"https://esm.sh/three@0.170.0";
+
+import {Chess} from
+"https://esm.sh/chess.js@1.4.0";
+
+// =====================
+// KONEKSI ONLINE
+// =====================
+
+const socket=io();
+
+let myColor=null;
+let room=null;
+let currentFen=null;
+let chess=new Chess();
+
+const status=document.getElementById("status");
+const roomInfo=document.getElementById("roomInfo");
+const turnText=document.getElementById("turn");
+const message=document.getElementById("message");
+
+socket.on("connect",()=>{
+ document.getElementById("connection").textContent=
+ "● Online";
+});
+
+socket.on("disconnect",()=>{
+ document.getElementById("connection").textContent=
+ "● Terputus";
+});
+
+document.getElementById("create").onclick=()=>{
+ socket.emit("create-room",result=>{
+  if(!result.success)return;
+
+  room=result.room;
+  myColor=result.color;
+
+  roomInfo.textContent="ROOM: "+room+" | PUTIH";
+
+  message.textContent="Bagikan kode room kepada temanmu!";
+ });
+};
+
+document.getElementById("join").onclick=()=>{
+ const code=document.getElementById("roomInput")
+ .value.trim();
+
+ socket.emit("join-room",code,result=>{
+  if(!result.success){
+   message.textContent=result.message;
+   return;
+  }
+
+  room=result.room;
+  myColor=result.color;
+
+  roomInfo.textContent="ROOM: "+room+
+   (myColor==="w"?" | PUTIH":" | HITAM");
+
+  message.textContent="Berhasil bergabung!";
+ });
+};
+
+socket.on("game-state",data=>{
+ const oldFen=currentFen;
+ currentFen=data.fen;
+ chess.load(data.fen);
+
+ turnText.textContent=
+ "Giliran: "+(data.turn==="w"?"Putih":"Hitam");
+
+ if(data.checkmate){
+  status.textContent="SKAKMAT!";
+ }else if(data.draw){
+  status.textContent="SERI!";
+ }else if(data.check){
+  status.textContent="SKAK!";
+ }else{
+  status.textContent="Permainan berlangsung";
+ }
+
+ if(data.players.black){
+  roomInfo.textContent="ROOM: "+room+" | 2 PEMAIN";
+ }
+
+ if(oldFen!==currentFen){
+  selected=null;
+  legalTargets=[];
+  drawPieces();
+ }
+
+});
+
+socket.on("opponent-left",()=>{
+ message.textContent="Lawan terputus dari room.";
+});
+
+document.getElementById("reset").onclick=()=>{
+ socket.emit("reset-game",result=>{
+  if(!result.success){
+   message.textContent="Hanya pemain putih yang dapat reset.";
+  }
+ });
+};
+
+// =====================
+// THREE JS
+// =====================
+
+const scene=new THREE.Scene();
+scene.background=new THREE.Color(0x171a20);
+
+const camera=new THREE.PerspectiveCamera(
+ 45,innerWidth/innerHeight,.1,100
+);
+
+let cameraAngle=0;
+let cameraDistance=10;
+
+camera.position.set(0,8,10);
+
+const renderer=new THREE.WebGLRenderer({
+ antialias:true
+});
+
+renderer.setSize(innerWidth,innerHeight);
+renderer.setPixelRatio(
+ Math.min(devicePixelRatio,1.5)
+);
+renderer.shadowMap.enabled=true;
+renderer.shadowMap.type=THREE.PCFSoftShadowMap;
+
+document.body.appendChild(renderer.domElement);
+
+scene.add(new THREE.AmbientLight(0xffffff,.7));
+
+const light=new THREE.DirectionalLight(
+ 0xffe4b8,2.5
+);
+
+light.position.set(-5,12,8);
+light.castShadow=true;
+light.shadow.mapSize.set(1024,1024);
+scene.add(light);
+
+// LANTAI
+const floor=new THREE.Mesh(
+ new THREE.PlaneGeometry(200,200),
+ new THREE.MeshStandardMaterial({color:0x17191e})
+);
+floor.rotation.x=-Math.PI/2;
+floor.position.y=-.4;
+floor.receiveShadow=true;
+scene.add(floor);
+
+// =====================
+// PAPAN KAYU
+// =====================
+
+const boardGroup=new THREE.Group();
+scene.add(boardGroup);
+
+const darkWood=new THREE.MeshStandardMaterial({
+ color:0x55351f,
+ roughness:.35
+});
+
+const lightWood=new THREE.MeshStandardMaterial({
+ color:0xd7b78b,
+ roughness:.42
+});
+
+const border=new THREE.Mesh(
+ new THREE.BoxGeometry(8.8,.5,8.8),
+ darkWood
+);
+
+border.position.y=-.12;
+border.castShadow=true;
+border.receiveShadow=true;
+boardGroup.add(border);
+
+// 64 KOTAK
+const squares=[];
+
+for(let row=0;row<8;row++){
+ for(let col=0;col<8;col++){
+
+  const mat=(row+col)%2===0?
+   lightWood:darkWood;
+
+  const square=new THREE.Mesh(
+   new THREE.BoxGeometry(1,.08,1),
+   mat.clone()
+  );
+
+  square.position.set(
+   col-3.5,.18,row-3.5
+  );
+
+  square.userData.square=
+   "abcdefgh"[col]+(8-row);
+
+  square.receiveShadow=true;
+
+  boardGroup.add(square);
+  squares.push(square);
+ }
+}
+
+// =====================
+// BIDAK 3D
+// =====================
+
+const pieceObjects=new Map();
+
+const whiteMaterial=new THREE.MeshStandardMaterial({
+ color:0xf4ead6,
+ roughness:.22,
+ metalness:.08
+});
+
+const blackMaterial=new THREE.MeshStandardMaterial({
+ color:0x252a30,
+ roughness:.24,
+ metalness:.16
+});
+
+function makePiece(type,color){
+
+ const group=new THREE.Group();
+
+ const mat=color==="w"?
+  whiteMaterial:blackMaterial;
+
+ const gold=new THREE.MeshStandardMaterial({
+  color:0xb18b52,metalness:.65,roughness:.25
+ });
+
+ function part(geometry,y,material=mat,scale=1){
+  const mesh=new THREE.Mesh(geometry,material);
+  mesh.position.y=y;
+  mesh.scale.setScalar(scale);
+  mesh.castShadow=true;
+  mesh.receiveShadow=true;
+  group.add(mesh);
+ }
+
+ // Dasar bidak
+ part(new THREE.CylinderGeometry(.34,.39,.13,32),.26,gold);
+ part(new THREE.CylinderGeometry(.25,.32,.16,32),.4);
+ part(new THREE.CylinderGeometry(.18,.25,.3,32),.62);
+
+ if(type==="p"){
+  part(new THREE.SphereGeometry(.19,24,24),.91);
+ }
+
+ if(type==="r"){
+  part(new THREE.CylinderGeometry(.22,.28,.55,32),1);
+  part(new THREE.CylinderGeometry(.29,.29,.13,32),1.32,gold);
+  for(let i=0;i<4;i++){
+   const angle=i*Math.PI/2;
+   const top=new THREE.Mesh(
+    new THREE.BoxGeometry(.15,.22,.15),mat
+   );
+   top.position.set(
+    Math.cos(angle)*.2,1.48,
+    Math.sin(angle)*.2
+   );
+   group.add(top);
+  }
+ }
+
+ if(type==="n"){
+  const horse=new THREE.Mesh(
+   new THREE.ConeGeometry(.27,.8,5),mat
+  );
+  horse.position.set(0,1.08,-.06);
+  horse.rotation.z=-.35;
+  horse.castShadow=true;
+  group.add(horse);
+
+  part(new THREE.SphereGeometry(.08,12,12),1.42,gold);
+ }
+
+ if(type==="b"){
+  part(new THREE.ConeGeometry(.27,.75,32),1.05);
+  part(new THREE.SphereGeometry(.13,24,24),1.48,gold);
+ }
+
+ if(type==="q"){
+  part(new THREE.ConeGeometry(.3,.65,32),1.05);
+  part(new THREE.SphereGeometry(.2,24,24),1.48,gold);
+  for(let i=0;i<5;i++){
+   const a=i*Math.PI*2/5;
+   const gem=new THREE.Mesh(
+    new THREE.SphereGeometry(.08,12,12),gold
+   );
+   gem.position.set(
+    Math.cos(a)*.24,1.65,
+    Math.sin(a)*.24
+   );
+   group.add(gem);
+  }
+ }
+
+ if(type==="k"){
+  part(new THREE.ConeGeometry(.28,.65,32),1.05);
+  part(new THREE.BoxGeometry(.1,.55,.1),1.55,gold);
+  part(new THREE.BoxGeometry(.38,.1,.1),1.62,gold);
+ }
+
+ group.userData.type=type;
+ group.userData.color=color;
+
+ return group;
+}
+
+// =====================
+// KOORDINAT BIDAK
+// =====================
+
+function positionOf(square){
+ const col="abcdefgh".indexOf(square[0]);
+ const row=8-Number(square[1]);
+
+ return new THREE.Vector3(
+  col-3.5,.24,row-3.5
+ );
+}
+
+function drawPieces(){
+
+ pieceObjects.forEach(p=>boardGroup.remove(p));
+ pieceObjects.clear();
+
+ const board=chess.board();
+
+ board.forEach((row,r)=>{
+  row.forEach((p,c)=>{
+   if(!p)return;
+
+   const name="abcdefgh"[c]+(8-r);
+
+   const object=makePiece(p.type,p.color);
+   const pos=positionOf(name);
+
+   object.position.copy(pos);
+
+   boardGroup.add(object);
+   pieceObjects.set(name,object);
+  });
+ });
+}
+
+drawPieces();
+
+// =====================
+// PILIH BIDAK
+// =====================
+
+let selected=null;
+let legalTargets=[];
+let lastMove=null;
+
+function showTargets(square){
+
+ legalTargets=chess.moves({
+  square,
+  verbose:true
+ });
+
+ const piece=chess.get(square);
+
+ if(!piece)return;
+
+ selected=square;
+
+ message.textContent=
+ "Bidak "+piece.type.toUpperCase()+
+ " dipilih. Kotak yang menyala adalah tujuan legal.";
+
+}
+
+function clearSelection(){
+ selected=null;
+ legalTargets=[];
+}
+
+// =====================
+// ANIMASI PILIH
+// =====================
+
+let selectedHeight=0;
+
+function updateSelection(dt){
+
+ selectedHeight+=dt*5;
+
+ pieceObjects.forEach((piece,square)=>{
+  const target=square===selected?.12:0;
+
+  const current=piece.userData.height||0;
+
+  piece.userData.height=THREE.MathUtils.lerp(
+   current,target,.2
+  );
+
+  piece.position.y=.24+piece.userData.height;
+ });
+}
+
+// =====================
+// HIGHLIGHT
+// =====================
+
+const highlights=[];
+
+function clearHighlights(){
+ highlights.forEach(h=>boardGroup.remove(h));
+ highlights.length=0;
+}
+
+function drawHighlights(){
+
+ clearHighlights();
+
+ if(selected){
+  const square=squares.find(
+   s=>s.userData.square===selected
+  );
+
+  if(square){
+   const h=new THREE.Mesh(
+    new THREE.PlaneGeometry(.9,.9),
+    new THREE.MeshBasicMaterial({
+     color:0xffd84d,transparent:true,opacity:.5
+    })
+   );
+
+   h.rotation.x=-Math.PI/2;
+   h.position.set(
+    square.position.x,.235,square.position.z
+   );
+
+   boardGroup.add(h);
+   highlights.push(h);
+  }
+ }
+
+ legalTargets.forEach(move=>{
+  const pos=positionOf(move.to);
+
+  const circle=new THREE.Mesh(
+   new THREE.CircleGeometry(.15,24),
+   new THREE.MeshBasicMaterial({
+    color:0x27e0a0,transparent:true,opacity:.8
+   })
+  );
+
+  circle.rotation.x=-Math.PI/2;
+  circle.position.set(pos.x,.25,pos.z);
+
+  boardGroup.add(circle);
+  highlights.push(circle);
+ });
+}
+
+// =====================
+// KLIK PAPAN
+// =====================
+
+const raycaster=new THREE.Raycaster();
+const mouse=new THREE.Vector2();
+
+renderer.domElement.addEventListener("pointerdown",event=>{
+
+ mouse.x=(event.clientX/innerWidth)*2-1;
+ mouse.y=-(event.clientY/innerHeight)*2+1;
+
+ raycaster.setFromCamera(mouse,camera);
+
+ const hits=raycaster.intersectObjects(squares);
+
+ if(!hits.length)return;
+
+ const square=hits[0].object.userData.square;
+
+ if(!room){
+  message.textContent="Buat atau masuk room terlebih dahulu!";
+  return;
+ }
+
+ if(!myColor){
+  return;
+ }
+
+ if(chess.turn()!==myColor){
+  message.textContent="Tunggu giliran lawan!";
+  return;
+ }
+
+ if(selected){
+
+  const move=legalTargets.find(
+   m=>m.to===square
+  );
+
+  if(move){
+
+   const promotion=move.flags.includes("p")?
+    "q":undefined;
+
+   socket.emit("make-move",{
+    from:selected,
+    to:square,
+    promotion
+   },result=>{
+
+    if(!result.success){
+     message.textContent=
+      result.message||"Gerakan gagal!";
+    }
+
+   });
+
+   clearSelection();
+   clearHighlights();
+   return;
+  }
+ }
+
+ const piece=chess.get(square);
+
+ if(piece&&piece.color===myColor){
+  showTargets(square);
+ }else{
+  clearSelection();
+ }
+
+ drawHighlights();
+
+});
+
+// =====================
+// ANIMASI KAMERA
+// =====================
+
+document.getElementById("rotate").onclick=()=>{
+ cameraAngle+=Math.PI/4;
+};
+
+document.getElementById("zoomIn").onclick=()=>{
+ cameraDistance=Math.max(6,cameraDistance-1);
+};
+
+document.getElementById("zoomOut").onclick=()=>{
+ cameraDistance=Math.min(17,cameraDistance+1);
+};
+
+// =====================
+// ANIMASI
+// =====================
+
+let previous=0;
+
+function animate(time){
+
+ requestAnimationFrame(animate);
+
+ const dt=Math.min((time-previous)/1000,.05);
+ previous=time;
+
+ const x=Math.sin(cameraAngle)*cameraDistance;
+ const z=Math.cos(cameraAngle)*cameraDistance;
+
+ camera.position.lerp(
+  new THREE.Vector3(x,7,z),.06
+ );
+
+ camera.lookAt(0,0,0);
+
+ updateSelection(dt);
+ drawHighlights();
+
+ renderer.render(scene,camera);
+}
+
+requestAnimationFrame(animate);
+
+// =====================
+// RESIZE
+// =====================
+
+window.addEventListener("resize",()=>{
+ camera.aspect=innerWidth/innerHeight;
+ camera.updateProjectionMatrix();
+ renderer.setSize(innerWidth,innerHeight);
+});
+
+</script>
+</body>
+</html>
